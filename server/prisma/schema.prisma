@@ -1,0 +1,190 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  PATIENT
+  DOCTOR
+  STAFF
+  ADMIN
+}
+
+enum TokenStatus {
+  WAITING
+  SERVING
+  COMPLETED
+  SKIPPED
+  CANCELLED
+}
+
+enum AppointmentStatus {
+  BOOKED
+  CHECKED_IN
+  COMPLETED
+  CANCELLED
+}
+
+enum SchedulingPolicy {
+  FIFO
+  LIFO
+  PRIORITY
+}
+
+model User {
+  id           String         @id @default(cuid())
+  name         String
+  email        String         @unique
+  passwordHash String
+  role         Role           @default(PATIENT)
+  active       Boolean        @default(true)
+  patient      Patient?
+  doctor       Doctor?
+  staff        Staff?
+  appointments Appointment[]
+  tokens       QueueToken[]
+  notifications Notification[]
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  @@index([role, active])
+}
+
+model Patient {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  phone     String?
+  birthDate DateTime?
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+}
+
+model Doctor {
+  id           String     @id @default(cuid())
+  userId       String     @unique
+  departmentId String
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  department   Department @relation(fields: [departmentId], references: [id])
+  createdAt    DateTime   @default(now())
+  @@index([departmentId])
+}
+
+model Staff {
+  id           String     @id @default(cuid())
+  userId       String     @unique
+  departmentId String?
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  department   Department? @relation(fields: [departmentId], references: [id])
+  createdAt    DateTime   @default(now())
+  @@index([departmentId])
+}
+
+model Department {
+  id                String          @id @default(cuid())
+  name              String          @unique
+  description       String
+  averageServiceMin Int             @default(12)
+  policy            SchedulingPolicy @default(FIFO)
+  nextTokenNumber   Int             @default(1)
+  active            Boolean         @default(true)
+  doctors           Doctor[]
+  staff             Staff[]
+  appointments      Appointment[]
+  tokens            QueueToken[]
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  @@index([active, name])
+}
+
+model Appointment {
+  id           String            @id @default(cuid())
+  patientId    String
+  departmentId String
+  doctorId     String?
+  scheduledAt  DateTime
+  status       AppointmentStatus @default(BOOKED)
+  notes        String?
+  patient      User              @relation(fields: [patientId], references: [id])
+  department   Department        @relation(fields: [departmentId], references: [id])
+  token        QueueToken?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  @@index([patientId, scheduledAt])
+  @@index([departmentId, scheduledAt, status])
+}
+
+model QueueToken {
+  id             String      @id @default(cuid())
+  departmentId   String
+  patientId      String
+  appointmentId  String?     @unique
+  sequence       Int
+  code           String
+  serviceDate    DateTime    @db.Date
+  status         TokenStatus @default(WAITING)
+  priority       Int         @default(0)
+  isWalkIn       Boolean     @default(true)
+  registeredAt   DateTime    @default(now())
+  calledAt       DateTime?
+  completedAt    DateTime?
+  department     Department  @relation(fields: [departmentId], references: [id])
+  patient        User        @relation(fields: [patientId], references: [id])
+  appointment    Appointment? @relation(fields: [appointmentId], references: [id])
+  history        QueueHistory[]
+  @@unique([departmentId, serviceDate, sequence])
+  @@unique([departmentId, serviceDate, code])
+  @@index([departmentId, serviceDate, status, priority, registeredAt])
+  @@index([patientId, status])
+}
+
+model QueueHistory {
+  id        String     @id @default(cuid())
+  tokenId   String
+  action    String
+  actorId   String?
+  createdAt DateTime   @default(now())
+  token     QueueToken @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  @@index([tokenId, createdAt])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String
+  message   String
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId, createdAt])
+}
+
+model HospitalSetting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model AnalyticsRecord {
+  id              String   @id @default(cuid())
+  departmentId    String
+  recordedAt      DateTime @default(now())
+  arrivals        Int      @default(0)
+  completions     Int      @default(0)
+  averageWaitMin  Float?
+  @@index([departmentId, recordedAt])
+}
+
+model ActivityLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  action    String
+  entity    String
+  entityId  String?
+  createdAt DateTime @default(now())
+  @@index([createdAt])
+  @@index([actorId, createdAt])
+}
