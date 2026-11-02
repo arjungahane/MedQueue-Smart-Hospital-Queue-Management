@@ -11,3 +11,6 @@ coverage/
 .vscode/
 *.swp
 *.tmp
+
+# Local Netlify folder
+.netlify
