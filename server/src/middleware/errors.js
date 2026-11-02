@@ -7,6 +7,13 @@ export function errorHandler(error, req, res, next) {
   if (error.name === 'ZodError') {
     return res.status(400).json({ error: 'Please check the submitted information.', details: error.issues });
   }
+  if (error.code === 'P2004' && /Appointment_schedule_no_overlap|23P01/.test(
+    String(error.meta?.database_error ?? error.meta?.cause ?? ''),
+  )) {
+    return res.status(409).json({
+      error: 'This slot has already been booked or is within the required 5-minute buffer. Please select another time.',
+    });
+  }
   if (error.code === 'P2002') return res.status(409).json({ error: 'That record already exists.' });
   if (error.code === 'P2025') return res.status(404).json({ error: 'The requested record was not found.' });
   if (error.status && error.status < 500) return res.status(error.status).json({ error: error.message });

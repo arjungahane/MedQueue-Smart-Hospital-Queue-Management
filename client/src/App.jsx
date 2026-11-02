@@ -9,6 +9,14 @@ import { useAuth } from './auth.jsx';
 
 const API_ORIGIN = (import.meta.env.VITE_API_URL || 'http://localhost:4000/api').replace(/\/api\/?$/, '');
 
+function localDateValue(date) {
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 10);
+}
+
+function timezoneOffsetForDate(date) {
+  return new Date(`${date}T12:00:00`).getTimezoneOffset();
+}
+
 function Logo({ inverse = false }) {
   return <Link to="/" className={`flex items-center gap-2.5 font-display text-xl font-extrabold tracking-tight ${inverse ? 'text-white' : 'text-ink'}`}>
     <span className="grid h-9 w-9 place-items-center rounded-xl bg-brand-600 text-white"><HeartPulse size={20} strokeWidth={2.5} /></span>
@@ -111,7 +119,15 @@ function Dashboard() {
   const [notice, setNotice] = useState('');
   const [navOpen, setNavOpen] = useState(false);
   const [tab, setTab] = useState('Overview');
-  const [booking, setBooking] = useState({ departmentId: '', scheduledAt: '' });
+  const [booking, setBooking] = useState({
+    departmentId: '',
+    doctorId: '',
+    date: localDateValue(new Date()),
+    scheduledAt: '',
+  });
+  const [appointmentBusy, setAppointmentBusy] = useState(false);
+  const [availabilityVersion, setAvailabilityVersion] = useState(0);
+  const [reschedulingAppointmentId, setReschedulingAppointmentId] = useState('');
   const [simArrival, setSimArrival] = useState(8);
   const [simService, setSimService] = useState(12);
   const [simulated, setSimulated] = useState(null);
@@ -129,8 +145,13 @@ function Dashboard() {
       setTicket(activeTokens[0] || null);
     }
     if (!activeDept && deptResult.data.data[0]) {
-      setActiveDept(deptResult.data.data[0].id);
-      setBooking((old) => ({...old, departmentId: deptResult.data.data[0].id}));
+      const department = deptResult.data.data[0];
+      setActiveDept(department.id);
+      setBooking((old) => ({
+        ...old,
+        departmentId: department.id,
+        doctorId: department.doctors[0]?.id || '',
+      }));
     }
     if (staffMode) {
       try { setOverview((await api.get('/analytics/overview')).data.data); } catch { setOverview(null); }
@@ -152,7 +173,19 @@ function Dashboard() {
           try { const activeTokens = await api.get('/queues/mine'); if (active) setTicket(activeTokens.data.data[0] || null); }
           catch (e) { if (active) setError(getErrorMessage(e)); }
         }
-        if (list[0]) { setActiveDept(list[0].id); setBooking((old)=>({...old, departmentId:list[0].id})); }
+        if (list[0]) {
+          setActiveDept(list[0].id);
+          setBooking((old) => {
+            const department = list.find((item) => item.id === old.departmentId) || list[0];
+            return {
+              ...old,
+              departmentId: department.id,
+              doctorId: department.doctors.some((doctor) => doctor.id === old.doctorId)
+                ? old.doctorId
+                : department.doctors[0]?.id || '',
+            };
+          });
+        }
         if (staffMode) {
           try { const result = await api.get('/analytics/overview'); if (active) setOverview(result.data.data); }
           catch (e) { if (active) setError(getErrorMessage(e)); }
@@ -177,11 +210,55 @@ function Dashboard() {
 
   async function createAppointment(event) {
     event.preventDefault(); setNotice(''); setError('');
+    if (!booking.scheduledAt || appointmentBusy) return;
+    setAppointmentBusy(true);
     try {
-      const notes = new FormData(event.currentTarget).get('notes');
-      const { data } = await api.post('/appointments', { departmentId: booking.departmentId, scheduledAt: new Date(booking.scheduledAt).toISOString(), ...(notes ? { notes } : {}) });
-      setAppointments((old)=>[data.data,...old]); setNotice('Your appointment is booked. You can check in for a queue token on the day of your visit.');
-      setBooking((old)=>({...old,scheduledAt:''}));
+      const notes = String(new FormData(event.currentTarget).get('notes') || '');
+      const body = {
+        scheduledAt: booking.scheduledAt,
+        timezoneOffset: timezoneOffsetForDate(booking.date),
+        ...(booking.doctorId ? { doctorId: booking.doctorId } : {}),
+        ...(notes ? { notes } : {}),
+      };
+      if (reschedulingAppointmentId) {
+        const { data } = await api.put(`/appointments/${reschedulingAppointmentId}`, body);
+        setAppointments((old) => old.map((item) => item.id === reschedulingAppointmentId ? data.data : item));
+        setNotice('Your appointment has been rescheduled.');
+        setReschedulingAppointmentId('');
+      } else {
+        const { data } = await api.post('/appointments', { ...body, departmentId: booking.departmentId });
+        setAppointments((old) => [data.data, ...old]);
+        setNotice('Your appointment is booked. You can check in for a queue token on the day of your visit.');
+      }
+      setBooking((old) => ({ ...old, scheduledAt: '' }));
+      setAvailabilityVersion((version) => version + 1);
+    } catch (e) { setError(getErrorMessage(e)); }
+    finally { setAppointmentBusy(false); }
+  }
+  function startRescheduling(appointment) {
+    const department = departments.find((item) => item.id === appointment.departmentId);
+    const appointmentDate = new Date(appointment.scheduledAt);
+    const date = localDateValue(appointmentDate) < localDateValue(new Date())
+      ? localDateValue(new Date())
+      : localDateValue(appointmentDate);
+    setBooking({
+      departmentId: appointment.departmentId,
+      doctorId: appointment.doctorId || department?.doctors[0]?.id || '',
+      date,
+      scheduledAt: '',
+    });
+    setReschedulingAppointmentId(appointment.id);
+    setTab('Appointments');
+    setError('');
+    setNotice('Choose a new available time. Your current appointment remains reserved until you confirm.');
+  }
+  async function cancelAppointment(id) {
+    try {
+      await api.delete(`/appointments/${id}`);
+      if (reschedulingAppointmentId === id) setReschedulingAppointmentId('');
+      setAvailabilityVersion((version) => version + 1);
+      await loadBase();
+      setNotice('Appointment cancelled.');
     } catch (e) { setError(getErrorMessage(e)); }
   }
   async function registerWalkIn() {
@@ -235,9 +312,9 @@ function Dashboard() {
         {notice&&<div className="mb-5 flex items-center justify-between rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-700"><span>{notice}</span><button aria-label="Dismiss message" onClick={()=>setNotice('')}><X size={17} /></button></div>}
         {loading?<div className="grid gap-4 md:grid-cols-3">{[1,2,3].map(x=><div key={x} className="skeleton h-32 rounded-2xl" />)}</div>:<>
           {tab==='Overview'&&<div className="space-y-6">
-            {staffMode?<><StatsCards overview={overview} /><div className="grid gap-5 xl:grid-cols-[1.35fr_.8fr]"><Panel title="Department activity" subtitle="Today’s registrations and completions"><DepartmentChart departments={overview?.byDepartment||[]} /></Panel><QueuePanel departments={departments} activeDept={activeDept} setActiveDept={setActiveDept} queue={queue} user={user} onRegister={registerWalkIn} onAction={runAction} onPolicy={setPolicy} /></div><div className="grid gap-5 xl:grid-cols-2"><SimulationPanel arrival={simArrival} service={simService} setArrival={setSimArrival} setService={setSimService} onSimulate={()=>setSimulated(true)} result={simulation} /><Panel title="Today’s appointments" subtitle={`${appointments.length} scheduled`}><AppointmentList appointments={appointments.slice(0,5)} /></Panel></div></>:<><div className="grid gap-5 xl:grid-cols-[1.1fr_.9fr]"><QueuePanel departments={departments} activeDept={activeDept} setActiveDept={setActiveDept} queue={queue} user={user} onRegister={registerWalkIn} onAction={runAction} onPolicy={setPolicy} /><BookingPanel departments={departments} booking={booking} setBooking={setBooking} onSubmit={createAppointment} /></div><TicketCard ticket={ticket} /><Panel title="Your appointments" subtitle="Upcoming and recent visits"><AppointmentList appointments={appointments} onCheckIn={checkInAppointment} onCancel={async(id)=>{try{await api.delete(`/appointments/${id}`);await loadBase();setNotice('Appointment cancelled.');}catch(e){setError(getErrorMessage(e));}}} patient /></Panel></>}
+            {staffMode?<><StatsCards overview={overview} /><div className="grid gap-5 xl:grid-cols-[1.35fr_.8fr]"><Panel title="Department activity" subtitle="Today’s registrations and completions"><DepartmentChart departments={overview?.byDepartment||[]} /></Panel><QueuePanel departments={departments} activeDept={activeDept} setActiveDept={setActiveDept} queue={queue} user={user} onRegister={registerWalkIn} onAction={runAction} onPolicy={setPolicy} /></div><div className="grid gap-5 xl:grid-cols-2"><SimulationPanel arrival={simArrival} service={simService} setArrival={setSimArrival} setService={setSimService} onSimulate={()=>setSimulated(true)} result={simulation} /><Panel title="Today’s appointments" subtitle={`${appointments.length} scheduled`}><AppointmentList appointments={appointments.slice(0,5)} /></Panel></div></>:<><div className="grid gap-5 xl:grid-cols-[1.1fr_.9fr]"><QueuePanel departments={departments} activeDept={activeDept} setActiveDept={setActiveDept} queue={queue} user={user} onRegister={registerWalkIn} onAction={runAction} onPolicy={setPolicy} /><BookingPanel departments={departments} booking={booking} setBooking={setBooking} onSubmit={createAppointment} isSubmitting={appointmentBusy} availabilityVersion={availabilityVersion} onAvailabilityChange={setAvailabilityVersion} reschedulingAppointmentId={reschedulingAppointmentId} /></div><TicketCard ticket={ticket} /><Panel title="Your appointments" subtitle="Upcoming and recent visits"><AppointmentList appointments={appointments} onCheckIn={checkInAppointment} onCancel={cancelAppointment} onReschedule={startRescheduling} patient /></Panel></>}
           </div>}
-          {tab==='Appointments'&&<div className="grid gap-5 xl:grid-cols-[.8fr_1.2fr]"><BookingPanel departments={departments} booking={booking} setBooking={setBooking} onSubmit={createAppointment} /><Panel title="Appointment history" subtitle="Your scheduled and past visits"><AppointmentList appointments={appointments} onCheckIn={checkInAppointment} onCancel={async(id)=>{try{await api.delete(`/appointments/${id}`);await loadBase();setNotice('Appointment cancelled.');}catch(e){setError(getErrorMessage(e));}}} patient /></Panel></div>}
+          {tab==='Appointments'&&<div className="grid gap-5 xl:grid-cols-[.8fr_1.2fr]"><BookingPanel departments={departments} booking={booking} setBooking={setBooking} onSubmit={createAppointment} isSubmitting={appointmentBusy} availabilityVersion={availabilityVersion} onAvailabilityChange={setAvailabilityVersion} reschedulingAppointmentId={reschedulingAppointmentId} /><Panel title="Appointment history" subtitle="Your scheduled and past visits"><AppointmentList appointments={appointments} onCheckIn={checkInAppointment} onCancel={cancelAppointment} onReschedule={startRescheduling} patient /></Panel></div>}
           {tab==='Queue board'&&<QueuePanel large departments={departments} activeDept={activeDept} setActiveDept={setActiveDept} queue={queue} user={user} onRegister={registerWalkIn} onAction={runAction} onPolicy={setPolicy} />}
           {tab==='Analytics'&&<div className="space-y-5"><StatsCards overview={overview} /><div className="grid gap-5 xl:grid-cols-2"><Panel title="Department queue performance" subtitle="Live counts paired with an M/M/1 estimate"><DepartmentChart departments={overview?.byDepartment||[]} /></Panel><SimulationPanel arrival={simArrival} service={simService} setArrival={setSimArrival} setService={setSimService} onSimulate={()=>setSimulated(true)} result={simulation} /></div></div>}
           {tab==='Departments'&&isAdmin&&<Panel title="Manage departments" subtitle="Add an active department to the hospital directory"><DepartmentManager departments={departments} onSubmit={createDepartment} onDeactivate={async(id)=>{try{await api.delete(`/departments/${id}`);await loadBase();setNotice('Department deactivated.');}catch(e){setError(getErrorMessage(e));}}} /></Panel>}
@@ -274,14 +351,170 @@ function QueuePanel({ departments, activeDept, setActiveDept, queue, user, onReg
   </Panel>;
 }
 
-function BookingPanel({ departments, booking, setBooking, onSubmit }) {
-  const minDate=new Date(Date.now()+60*60*1000).toISOString().slice(0,16);
-  return <Panel title="Book an appointment" subtitle="Choose a department and a time that suits you"><form onSubmit={onSubmit} className="space-y-4"><label className="block"><span className="mb-1.5 block text-sm font-bold text-ink">Department</span><select required value={booking.departmentId} onChange={(e)=>setBooking({...booking,departmentId:e.target.value})} className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-brand-500">{departments.map(d=><option key={d.id} value={d.id}>{d.name}</option>)}</select></label><Field label="Appointment date & time" type="datetime-local" value={booking.scheduledAt} min={minDate} onChange={(scheduledAt)=>setBooking({...booking,scheduledAt})} required /><label className="block"><span className="mb-1.5 block text-sm font-bold text-ink">Notes <span className="font-medium text-slate-400">(optional)</span></span><textarea name="notes" rows="3" maxLength="500" placeholder="Anything you'd like the care team to know?" className="w-full resize-none rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-brand-500" /></label><button className="w-full rounded-xl bg-brand-600 py-3 font-bold text-white hover:bg-brand-700">Request appointment <ArrowRight size={15} className="ml-1 inline" /></button><p className="text-center text-[11px] leading-5 text-slate-400">Appointments are stored securely in the MedQueue demo database.</p></form></Panel>;
+function BookingPanel({
+  departments,
+  booking,
+  setBooking,
+  onSubmit,
+  isSubmitting,
+  availabilityVersion,
+  onAvailabilityChange,
+  reschedulingAppointmentId,
+}) {
+  const [slots, setSlots] = useState([]);
+  const [availabilityLoading, setAvailabilityLoading] = useState(false);
+  const [availabilityError, setAvailabilityError] = useState('');
+  const [slotDuration, setSlotDuration] = useState(0);
+  const department = departments.find((item) => item.id === booking.departmentId);
+  const requiresDoctor = Boolean(department?.doctors.length);
+
+  useEffect(() => {
+    if (!booking.departmentId || !booking.date || (requiresDoctor && !booking.doctorId)) {
+      setSlots([]);
+      setSlotDuration(0);
+      setAvailabilityLoading(false);
+      setAvailabilityError('');
+      return undefined;
+    }
+    let active = true;
+    setSlots([]);
+    setSlotDuration(0);
+    setAvailabilityLoading(true);
+    setAvailabilityError('');
+    api.get('/appointments/availability', {
+      params: {
+        departmentId: booking.departmentId,
+        date: booking.date,
+        timezoneOffset: timezoneOffsetForDate(booking.date),
+        ...(booking.doctorId ? { doctorId: booking.doctorId } : {}),
+        ...(reschedulingAppointmentId ? { excludeAppointmentId: reschedulingAppointmentId } : {}),
+      },
+    }).then(({ data }) => {
+      if (active) {
+        setSlots(data.data.slots);
+        setSlotDuration(data.data.durationMinutes);
+      }
+    }).catch((error) => {
+      if (active) setAvailabilityError(getErrorMessage(error));
+    }).finally(() => {
+      if (active) setAvailabilityLoading(false);
+    });
+    return () => { active = false; };
+  }, [
+    booking.departmentId,
+    booking.doctorId,
+    booking.date,
+    availabilityVersion,
+    requiresDoctor,
+    reschedulingAppointmentId,
+  ]);
+
+  useEffect(() => {
+    if (!booking.departmentId) return undefined;
+    const socket = io(API_ORIGIN, { transports: ['websocket', 'polling'] });
+    socket.emit('join_appointment_department', booking.departmentId);
+    socket.on('appointments:updated', () => onAvailabilityChange((version) => version + 1));
+    return () => { socket.disconnect(); };
+  }, [booking.departmentId, onAvailabilityChange]);
+
+  const selectedSlotAvailable = slots.some((slot) =>
+    slot.scheduledAt === booking.scheduledAt && slot.available,
+  );
+  const availableCount = slots.filter((slot) => slot.available).length;
+  const minDate = localDateValue(new Date());
+  const onDepartmentChange = (departmentId) => {
+    const nextDepartment = departments.find((item) => item.id === departmentId);
+    setBooking((old) => ({
+      ...old,
+      departmentId,
+      doctorId: nextDepartment?.doctors[0]?.id || '',
+      scheduledAt: '',
+    }));
+  };
+  return <Panel
+    title={reschedulingAppointmentId ? 'Reschedule appointment' : 'Book an appointment'}
+    subtitle="Choose a department, doctor, date and available time"
+  >
+    <form onSubmit={onSubmit} className="space-y-4">
+      <label className="block">
+        <span className="mb-1.5 block text-sm font-bold text-ink">Department</span>
+        <select
+          required
+          value={booking.departmentId}
+          onChange={(event) => onDepartmentChange(event.target.value)}
+          className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-brand-500"
+        >
+          <option value="" disabled>Select a department</option>
+          {departments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+        </select>
+      </label>
+      {requiresDoctor && <label className="block">
+        <span className="mb-1.5 block text-sm font-bold text-ink">Doctor</span>
+        <select
+          required
+          value={booking.doctorId}
+          onChange={(event) => setBooking((old) => ({ ...old, doctorId: event.target.value, scheduledAt: '' }))}
+          className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-brand-500"
+        >
+          <option value="" disabled>Select a doctor</option>
+          {department.doctors.map((doctor) => (
+            <option key={doctor.id} value={doctor.id}>{doctor.user.name}</option>
+          ))}
+        </select>
+      </label>}
+      <Field
+        label="Appointment date"
+        type="date"
+        value={booking.date}
+        min={minDate}
+        onChange={(date) => setBooking((old) => ({ ...old, date, scheduledAt: '' }))}
+        required
+      />
+      <label className="block">
+        <span className="mb-1.5 block text-sm font-bold text-ink">Available time</span>
+        <select
+          required
+          value={booking.scheduledAt}
+          disabled={availabilityLoading || availableCount === 0}
+          onChange={(event) => setBooking((old) => ({ ...old, scheduledAt: event.target.value }))}
+          className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-brand-500 disabled:cursor-not-allowed disabled:bg-slate-50"
+        >
+          <option value="">
+            {availabilityLoading ? 'Checking availability…' : availableCount ? 'Select an available time' : 'No available times'}
+          </option>
+          {slots.map((slot) => (
+            <option key={slot.scheduledAt} value={slot.scheduledAt} disabled={!slot.available}>
+              {new Date(slot.scheduledAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+              {slot.available ? ' · Available' : ` · ${slot.reason}`}
+            </option>
+          ))}
+        </select>
+        <span className="mt-1.5 block text-xs text-slate-400">
+          Appointments run 9:00 AM–5:00 PM; duration is {slotDuration || department?.averageServiceMin || '—'} minutes with a 5-minute buffer.
+        </span>
+      </label>
+      {availabilityError && <div role="alert" className="rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{availabilityError}</div>}
+      <label className="block">
+        <span className="mb-1.5 block text-sm font-bold text-ink">Notes <span className="font-medium text-slate-400">(optional)</span></span>
+        <textarea name="notes" rows="3" maxLength="500" placeholder="Anything you'd like the care team to know?" className="w-full resize-none rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-brand-500" />
+      </label>
+      <button
+        disabled={isSubmitting || availabilityLoading || !selectedSlotAvailable}
+        className="w-full rounded-xl bg-brand-600 py-3 font-bold text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        {isSubmitting ? 'Please wait…' : reschedulingAppointmentId ? 'Confirm reschedule' : 'Request appointment'}
+        {!isSubmitting && <ArrowRight size={15} className="ml-1 inline" />}
+      </button>
+      <p className="text-center text-[11px] leading-5 text-slate-400">
+        Unavailable slots are disabled. Availability refreshes live when a booking changes.
+      </p>
+    </form>
+  </Panel>;
 }
 
-function AppointmentList({ appointments, onCancel, onCheckIn, patient=false }) {
+function AppointmentList({ appointments, onCancel, onCheckIn, onReschedule, patient=false }) {
   if (!appointments.length) return <Empty message="No appointments yet. Book a visit to see it here." />;
-  return <div className="divide-y divide-slate-100">{appointments.map((item)=><div key={item.id} className="flex flex-wrap items-center gap-3 py-3 first:pt-0 last:pb-0"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-brand-50 text-brand-700"><CalendarDays size={18} /></span><div className="min-w-0 flex-1"><div className="truncate text-sm font-extrabold text-ink">{item.department?.name||'Department'}</div><div className="mt-0.5 text-xs text-slate-400">{new Date(item.scheduledAt).toLocaleString()} · {item.status.toLowerCase().replace('_',' ')}</div></div>{item.token&&<span className="rounded-lg bg-canvas px-2.5 py-1.5 text-xs font-extrabold text-brand-700">Token {item.token.code}</span>}{patient&&item.status==='BOOKED'&&new Date(item.scheduledAt).toDateString()===new Date().toDateString()&&onCheckIn&&<button onClick={()=>onCheckIn(item)} className="rounded-lg px-2.5 py-1.5 text-xs font-bold text-brand-700 hover:bg-brand-50">Check in</button>}{patient&&onCancel&&['BOOKED','CHECKED_IN'].includes(item.status)&&<button onClick={()=>onCancel(item.id)} className="rounded-lg px-2.5 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50">Cancel</button>}</div>)}</div>;
+  return <div className="divide-y divide-slate-100">{appointments.map((item)=><div key={item.id} className="flex flex-wrap items-center gap-3 py-3 first:pt-0 last:pb-0"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-brand-50 text-brand-700"><CalendarDays size={18} /></span><div className="min-w-0 flex-1"><div className="truncate text-sm font-extrabold text-ink">{item.department?.name||'Department'}</div><div className="mt-0.5 text-xs text-slate-400">{new Date(item.scheduledAt).toLocaleString()} · {item.status.toLowerCase().replace('_',' ')} · {item.durationMinutes} min{item.doctor?.user?.name ? ` · ${item.doctor.user.name}` : ''}</div></div>{item.token&&<span className="rounded-lg bg-canvas px-2.5 py-1.5 text-xs font-extrabold text-brand-700">Token {item.token.code}</span>}{patient&&item.status==='BOOKED'&&new Date(item.scheduledAt).toDateString()===new Date().toDateString()&&onCheckIn&&<button onClick={()=>onCheckIn(item)} className="rounded-lg px-2.5 py-1.5 text-xs font-bold text-brand-700 hover:bg-brand-50">Check in</button>}{patient&&item.status==='BOOKED'&&onReschedule&&<button onClick={()=>onReschedule(item)} className="rounded-lg px-2.5 py-1.5 text-xs font-bold text-brand-700 hover:bg-brand-50">Reschedule</button>}{patient&&onCancel&&['BOOKED','CHECKED_IN'].includes(item.status)&&<button onClick={()=>onCancel(item.id)} className="rounded-lg px-2.5 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50">Cancel</button>}</div>)}</div>;
 }
 
 function TicketCard({ ticket }) {

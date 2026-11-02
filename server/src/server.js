@@ -12,6 +12,11 @@ io.on('connection', (socket) => {
   socket.on('join_department', (departmentId) => {
     if (typeof departmentId === 'string' && departmentId.length <= 64) socket.join(`department:${departmentId}`);
   });
+  socket.on('join_appointment_department', (departmentId) => {
+    if (typeof departmentId === 'string' && departmentId.length <= 64) {
+      socket.join(`appointment_department:${departmentId}`);
+    }
+  });
 });
 const app = createApp(io);
 httpServer.on('request', app);

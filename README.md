@@ -6,6 +6,8 @@ MedQueue is a full-stack outpatient queue management demonstration. It combines 
 
 - Register patients and sign in with role-based access.
 - Book appointments and register walk-ins into department queues.
+- Select a doctor and an available appointment time; active appointments reserve the doctor's slot and a five-minute buffer.
+- Reschedule or cancel eligible appointments, with availability updated live for other patients.
 - Generate department/day-specific tokens transactionally.
 - Track waiting, serving, skipped, completed, and cancelled visits.
 - Schedule with FIFO, LIFO, or priority-first ordering.
@@ -93,13 +95,16 @@ All JSON responses use `{ "data": ... }`; validation errors return `400`, authen
 | `POST /api/queues/:departmentId/:tokenId/skip` | Skip a token |
 | `PUT /api/queues/:departmentId/scheduling` | Change policy (admin/staff) |
 | `POST /api/appointments`, `GET /api/appointments` | Create or list appointments |
+| `GET /api/appointments/availability?departmentId=...&date=YYYY-MM-DD&timezoneOffset=...&doctorId=...` | List 5-minute appointment starts, with booked or buffer-conflicting times disabled |
 | `GET /api/appointments/:id`, `PUT /api/appointments/:id`, `DELETE /api/appointments/:id` | Read, update, or cancel an appointment with ownership checks |
 | `GET /api/patients`, `GET/PUT /api/patients/:id` | Staff directory and privacy-checked profile access |
 | `GET /api/patients/:id/appointments` | Patient history with ownership checks |
 | `GET /api/analytics/overview` | Queue counts and M/M/1 metrics |
 | `POST /api/departments` | Create a department (admin) |
 
-Socket.IO clients join `department:<id>` rooms with `join_department`; queue changes emit `queue:updated`.
+Socket.IO clients join `department:<id>` rooms with `join_department`; queue changes emit `queue:updated`. Appointment booking, rescheduling, and cancellation emit `appointments:updated` to `appointment_department:<id>` subscribers.
+
+Appointments use each department's configured average service duration (stored on each booking), run in 5-minute increments from 9:00 AM to 5:00 PM in the patient's local time, and reserve an additional five minutes after the service duration. The API serializes schedule changes by department and PostgreSQL enforces a partial exclusion constraint for active bookings. Apply the new database migration with `npm run db:deploy` before starting an updated API.
 
 ## Analytics
 
@@ -119,7 +124,6 @@ Add current application screenshots here after running the demo locally.
 
 ## Future enhancements
 
-- Appointment availability and doctor-specific time-slot management.
 - Email/SMS delivery integration and auditable password reset flow.
 - In-app/browser notifications and expanded user/staff administration.
 - Multi-hospital tenancy and fine-grained configurable roles.

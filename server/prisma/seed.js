@@ -42,6 +42,9 @@ async function main() {
     if (demo.role === 'DOCTOR') await prisma.doctor.upsert({ where: { userId: user.id }, update: { departmentId: general.id }, create: { userId: user.id, departmentId: general.id } });
     if (demo.role === 'STAFF') await prisma.staff.upsert({ where: { userId: user.id }, update: { departmentId: general.id }, create: { userId: user.id, departmentId: general.id } });
   }
+  const demoDoctor = await prisma.doctor.findUniqueOrThrow({
+    where: { userId: users['doctor@medqueue.test'].id },
+  });
 
   const serviceDate = new Date();
   serviceDate.setHours(0, 0, 0, 0);
@@ -72,7 +75,14 @@ async function main() {
     scheduledAt.setDate(scheduledAt.getDate() + 1);
     scheduledAt.setHours(10, 30, 0, 0);
     await prisma.appointment.create({
-      data: { patientId: users['patient@medqueue.test'].id, departmentId: general.id, scheduledAt },
+      data: {
+        patientId: users['patient@medqueue.test'].id,
+        departmentId: general.id,
+        doctorId: demoDoctor.id,
+        scheduleKey: `doctor:${demoDoctor.id}`,
+        durationMinutes: general.averageServiceMin,
+        scheduledAt,
+      },
     });
   }
 }

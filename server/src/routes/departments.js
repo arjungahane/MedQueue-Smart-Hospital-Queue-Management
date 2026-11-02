@@ -15,7 +15,7 @@ router.get('/', async (_req, res) => {
   const departments = await prisma.department.findMany({
     where: { active: true }, orderBy: { name: 'asc' },
     select: { id: true, name: true, description: true, averageServiceMin: true, policy: true,
-      doctors: { select: { user: { select: { id: true, name: true } } } } },
+      doctors: { select: { id: true, user: { select: { name: true } } } } },
   });
   res.json({ data: departments });
 });

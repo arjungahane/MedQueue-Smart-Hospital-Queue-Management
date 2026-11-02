@@ -68,6 +68,7 @@ model Doctor {
   departmentId String
   user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   department   Department @relation(fields: [departmentId], references: [id])
+  appointments Appointment[]
   createdAt    DateTime   @default(now())
   @@index([departmentId])
 }
@@ -100,20 +101,24 @@ model Department {
 }
 
 model Appointment {
-  id           String            @id @default(cuid())
-  patientId    String
-  departmentId String
-  doctorId     String?
-  scheduledAt  DateTime
-  status       AppointmentStatus @default(BOOKED)
-  notes        String?
-  patient      User              @relation(fields: [patientId], references: [id])
-  department   Department        @relation(fields: [departmentId], references: [id])
-  token        QueueToken?
-  createdAt    DateTime          @default(now())
-  updatedAt    DateTime          @updatedAt
+  id              String            @id @default(cuid())
+  patientId       String
+  departmentId    String
+  doctorId        String?
+  scheduleKey     String
+  scheduledAt     DateTime
+  durationMinutes Int               @default(15)
+  status          AppointmentStatus @default(BOOKED)
+  notes           String?
+  patient         User              @relation(fields: [patientId], references: [id])
+  department      Department        @relation(fields: [departmentId], references: [id])
+  doctor          Doctor?           @relation(fields: [doctorId], references: [id], onDelete: Restrict)
+  token           QueueToken?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
   @@index([patientId, scheduledAt])
   @@index([departmentId, scheduledAt, status])
+  @@index([doctorId, scheduledAt, status])
 }
 
 model QueueToken {
